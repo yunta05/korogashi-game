@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<style>html{padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px);box-sizing:border-box}body{margin:0}[hidden]{display:none!important}</style>
+<title>ころがし箱庭</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700;900&display=swap">
+<style>
+/* Layout: one screen. Thin HUD on top, the tilting tray fills the rest, overlays sit on the tray. Single committed look (a lacquered night-blue tray). */
+:root{
+  color-scheme: dark;
+  --night:#14213a;      /* page ground */
+  --tray:#1f3a5f;       /* board floor */
+  --tray-lit:#2b4f7c;   /* floor highlight */
+  --wall:#f2c14e;       /* walls, primary accent */
+  --wall-shade:#b9862a;
+  --ball:#7fe0c3;       /* the roller */
+  --pit:#0a1222;
+  --goal:#ff6f91;
+  --ink:#f4f1e6;        /* text */
+  --ink-soft:#a9b8d0;
+  --font: "Zen Maru Gothic", "Hiragino Maru Gothic ProN", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+}
+html,body{height:100%}
+body{
+  background:var(--night); color:var(--ink); font-family:var(--font);
+  display:flex; flex-direction:column; overflow:hidden;
+  padding-inline:16px; padding-block:10px 14px; box-sizing:border-box;
+  -webkit-user-select:none; user-select:none; overscroll-behavior:none;
+}
+.hud{display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding-bottom:8px}
+.hud h1{font-size:18px; font-weight:900; margin:0; letter-spacing:.04em}
+.stats{display:flex; gap:14px; font-size:14px; font-weight:700; color:var(--ink-soft); font-variant-numeric:tabular-nums}
+.stats b{color:var(--ink); font-weight:900}
+.stage{position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center}
+canvas{display:block; touch-action:none; border-radius:18px}
+.mode{font-size:12px; font-weight:700; color:var(--ink-soft); text-align:center; padding-top:8px; min-height:1.4em}
+.panel{
+  position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:14px; text-align:center; padding:20px; background:rgba(20,33,58,.86); border-radius:18px;
+}
+.panel h2{font-size:30px; font-weight:900; margin:0; text-wrap:balance; color:var(--wall)}
+.panel p{margin:0; font-size:15px; line-height:1.7; max-width:22em; color:var(--ink)}
+.panel .small{font-size:13px; color:var(--ink-soft)}
+button{
+  font:inherit; font-weight:900; font-size:18px; color:var(--night); background:var(--wall);
+  border:0; border-radius:999px; padding:14px 34px; box-shadow:0 5px 0 var(--wall-shade); cursor:pointer;
+}
+button:active{transform:translateY(3px); box-shadow:0 2px 0 var(--wall-shade)}
+button:focus-visible{outline:3px solid var(--ink); outline-offset:3px}
+</style>
+
+</head>
+<body>
+<div class="hud">
+  <h1>ころがし箱庭</h1>
+  <div class="stats"><span>タイム <b id="time">0.0</b></span><span>ほし <b id="stars">0/3</b></span></div>
+</div>
+<div class="stage" id="stage">
+  <canvas id="cv"></canvas>
+  <div class="panel" id="startPanel">
+    <h2>ゴールの穴へ</h2>
+    <p>スマホを傾けて玉を転がし、ピンクの穴に入れよう。黒い穴に落ちるとスタートに戻ります。</p>
+    <button id="startBtn" type="button">あそぶ</button>
+    <p class="small">いま持っている角度が「水平」になります。<br>傾きが使えないときは、画面を指でなぞって傾けられます。</p>
+  </div>
+  <div class="panel" id="clearPanel" hidden>
+    <h2>ゴール！</h2>
+    <p id="result"></p>
+    <button id="retryBtn" type="button">もういちど</button>
+  </div>
+</div>
+<div class="mode" id="mode"></div>
+
+<script>
+(function(){
+  const W=360,H=560,R=11,T=12;
+  const START={x:40,y:42}, GOAL={x:320,y:512,r:17};
+  const walls=[[0,110,260,T],[100,220,260,T],[0,330,250,T],[110,440,250,T],[250,490,T,70]];
+  const pits=[[170,78],[230,152],[140,196],[120,300],[205,258],[250,374],[150,416],[185,505]];
+  const PR=14;
+  const starDefs=[[310,168],[40,285],[45,505]];
+
+  const cv=document.getElementById('cv'), ctx=cv.getContext('2d'), stage=document.getElementById('stage');
+  const $=id=>document.getElementById(id);
+  let scale=1;
+  function fit(){
+    const r=stage.getBoundingClientRect();
+    scale=Math.max(0.2,Math.min(r.width/W,r.height/H));
+    const dpr=Math.min(window.devicePixelRatio||1,3);
+    cv.style.width=W*scale+'px'; cv.style.height=H*scale+'px';
+    cv.width=Math.round(W*scale*dpr); cv.height=Math.round(H*scale*dpr);
+    ctx.setTransform(scale*dpr,0,0,scale*dpr,0,0);
+    draw();
+  }
+
+  let ball,stars,playing=false,elapsed=0,falling=null,last=0;
+  let sensor={x:0,y:0,ok:false,beta0:null}, touch={x:0,y:0,on:false,ox:0,oy:0}, keys={};
+  function reset(){
+    ball={x:START.x,y:START.y,vx:0,vy:0,s:1};
+    stars=starDefs.map(s=>({x:s[0],y:s[1],got:false}));
+    elapsed=0; falling=null; sensor.beta0=null; hud();
+  }
+  function hud(){
+    $('time').textContent=elapsed.toFixed(1);
+    $('stars').textContent=stars.filter(s=>s.got).length+'/3';
+  }
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+  function onOrient(e){
+    if(e.gamma==null||e.beta==null) return;
+    sensor.ok=true;
+    if(sensor.beta0==null) sensor.beta0=clamp(e.beta,-20,70);
+    sensor.x=clamp(e.gamma/28,-1,1);
+    sensor.y=clamp((e.beta-sensor.beta0)/28,-1,1);
+  }
+  function tilt(){
+    if(touch.on) return touch;
+    let kx=(keys.ArrowRight?1:0)-(keys.ArrowLeft?1:0), ky=(keys.ArrowDown?1:0)-(keys.ArrowUp?1:0);
+    if(kx||ky) return {x:kx,y:ky};
+    if(sensor.ok) return sensor;
+    return {x:0,y:0};
+  }
+
+  function collideRect(x,y,w,h){
+    const nx=clamp(ball.x,x,x+w), ny=clamp(ball.y,y,y+h);
+    let dx=ball.x-nx, dy=ball.y-ny, d=Math.hypot(dx,dy);
+    if(d>=R) return;
+    if(d<1e-6){dx=0;dy=-1;d=1e-6;}
+    dx/=d; dy/=d;
+    ball.x=nx+dx*R; ball.y=ny+dy*R;
+    const vn=ball.vx*dx+ball.vy*dy;
+    if(vn<0){ball.vx-=1.35*vn*dx; ball.vy-=1.35*vn*dy;}
+  }
+  function step(dt){
+    const t=tilt();
+    ball.vx+=t.x*950*dt; ball.vy+=t.y*950*dt;
+    const f=Math.exp(-1.3*dt); ball.vx*=f; ball.vy*=f;
+    ball.x+=ball.vx*dt; ball.y+=ball.vy*dt;
+    if(ball.x<R){ball.x=R; if(ball.vx<0)ball.vx*=-0.35;}
+    if(ball.x>W-R){ball.x=W-R; if(ball.vx>0)ball.vx*=-0.35;}
+    if(ball.y<R){ball.y=R; if(ball.vy<0)ball.vy*=-0.35;}
+    if(ball.y>H-R){ball.y=H-R; if(ball.vy>0)ball.vy*=-0.35;}
+    for(const w of walls) collideRect(w[0],w[1],w[2],w[3]);
+    for(const s of stars) if(!s.got&&Math.hypot(ball.x-s.x,ball.y-s.y)<R+9){s.got=true;}
+    for(const p of pits) if(Math.hypot(ball.x-p[0],ball.y-p[1])<PR-2){falling={x:p[0],y:p[1],t:0,goal:false};return;}
+    if(Math.hypot(ball.x-GOAL.x,ball.y-GOAL.y)<GOAL.r-4) falling={x:GOAL.x,y:GOAL.y,t:0,goal:true};
+  }
+  function frame(now){
+    const dt=Math.min(0.033,(now-last)/1000||0); last=now;
+    if(playing){
+      if(falling){
+        falling.t+=dt; const k=Math.min(1,falling.t/0.4);
+        ball.x+=(falling.x-ball.x)*0.25; ball.y+=(falling.y-ball.y)*0.25; ball.s=1-k;
+        if(k>=1){
+          if(falling.goal){playing=false; finish();}
+          else{ball.x=START.x;ball.y=START.y;ball.vx=ball.vy=0;ball.s=1;falling=null;}
+        }
+      }else{
+        elapsed+=dt;
+        for(let i=0;i<4;i++){ if(falling)break; step(dt/4); }
+      }
+      hud();
+      $('mode').textContent=touch.on?'タッチで操作中':sensor.ok?'傾きで操作中（指でなぞっても動かせます）':'画面を指でなぞると、その方向に傾きます';
+    }
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+  function finish(){
+    const n=stars.filter(s=>s.got).length;
+    $('result').textContent='タイム '+elapsed.toFixed(1)+' 秒　ほし '+n+'/3';
+    $('clearPanel').hidden=false; $('mode').textContent='';
+  }
+
+  function rr(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+  function draw(now){
+    now=now||0;
+    const g=ctx.createLinearGradient(0,0,W,H); g.addColorStop(0,'#2b4f7c'); g.addColorStop(1,'#1f3a5f');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='rgba(255,255,255,.035)';
+    for(let y=20;y<H;y+=40)for(let x=20;x<W;x+=40){ctx.beginPath();ctx.arc(x,y,2,0,7);ctx.fill();}
+    // start mark
+    ctx.strokeStyle='rgba(244,241,230,.35)';ctx.lineWidth=2;ctx.setLineDash([4,5]);ctx.beginPath();ctx.arc(START.x,START.y,17,0,7);ctx.stroke();ctx.setLineDash([]);
+    // pits
+    for(const p of pits){
+      const pg=ctx.createRadialGradient(p[0],p[1]+2,2,p[0],p[1],PR);pg.addColorStop(0,'#000');pg.addColorStop(1,'#0a1222');
+      ctx.fillStyle=pg;ctx.beginPath();ctx.arc(p[0],p[1],PR,0,7);ctx.fill();
+      ctx.strokeStyle='rgba(0,0,0,.45)';ctx.lineWidth=2;ctx.stroke();
+    }
+    // goal
+    const pulse=1+0.08*Math.sin(now/300);
+    ctx.fillStyle='rgba(255,111,145,.25)';ctx.beginPath();ctx.arc(GOAL.x,GOAL.y,(GOAL.r+8)*pulse,0,7);ctx.fill();
+    ctx.fillStyle='#ff6f91';ctx.beginPath();ctx.arc(GOAL.x,GOAL.y,GOAL.r,0,7);ctx.fill();
+    ctx.fillStyle='#7a1f3a';ctx.beginPath();ctx.arc(GOAL.x,GOAL.y+1,GOAL.r-5,0,7);ctx.fill();
+    // stars
+    for(const s of stars){ if(s.got)continue;
+      ctx.save();ctx.translate(s.x,s.y);ctx.rotate(now/900);ctx.fillStyle='#fff3b0';ctx.beginPath();
+      for(let i=0;i<10;i++){const a=i*Math.PI/5-Math.PI/2,r=i%2?4:9;ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r);}
+      ctx.closePath();ctx.fill();ctx.restore();
+    }
+    // walls
+    for(const w of walls){
+      ctx.fillStyle='#b9862a';rr(w[0],w[1]+3,w[2],w[3],6);ctx.fill();
+      ctx.fillStyle='#f2c14e';rr(w[0],w[1],w[2],w[3],6);ctx.fill();
+    }
+    // ball
+    if(ball&&ball.s>0.02){
+      const r=R*ball.s;
+      ctx.fillStyle='rgba(0,0,0,.28)';ctx.beginPath();ctx.ellipse(ball.x+2,ball.y+4,r,r*.9,0,0,7);ctx.fill();
+      const bg=ctx.createRadialGradient(ball.x-r*.4,ball.y-r*.4,1,ball.x,ball.y,r);bg.addColorStop(0,'#d8fff2');bg.addColorStop(1,'#7fe0c3');
+      ctx.fillStyle=bg;ctx.beginPath();ctx.arc(ball.x,ball.y,r,0,7);ctx.fill();
+      const ex=clamp(ball.vx/200,-1,1)*2*ball.s, ey=clamp(ball.vy/200,-1,1)*2*ball.s;
+      ctx.fillStyle='#14213a';
+      ctx.beginPath();ctx.ellipse(ball.x-3.5*ball.s+ex,ball.y-1+ey,1.6*ball.s,2.6*ball.s,0,0,7);ctx.fill();
+      ctx.beginPath();ctx.ellipse(ball.x+3.5*ball.s+ex,ball.y-1+ey,1.6*ball.s,2.6*ball.s,0,0,7);ctx.fill();
+    }
+    // touch stick
+    if(touch.on){
+      ctx.strokeStyle='rgba(244,241,230,.5)';ctx.lineWidth=2;ctx.beginPath();ctx.arc(touch.ox,touch.oy,34,0,7);ctx.stroke();
+      ctx.fillStyle='rgba(244,241,230,.6)';ctx.beginPath();ctx.arc(touch.ox+touch.x*34,touch.oy+touch.y*34,10,0,7);ctx.fill();
+    }
+  }
+
+  function pos(e){const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)/scale,y:(e.clientY-r.top)/scale};}
+  cv.addEventListener('pointerdown',e=>{if(!playing)return;const p=pos(e);touch.on=true;touch.ox=p.x;touch.oy=p.y;touch.x=touch.y=0;try{cv.setPointerCapture(e.pointerId);}catch(_){}e.preventDefault();});
+  cv.addEventListener('pointermove',e=>{if(!touch.on)return;const p=pos(e);let dx=(p.x-touch.ox)/34,dy=(p.y-touch.oy)/34;const d=Math.hypot(dx,dy);if(d>1){dx/=d;dy/=d;}touch.x=dx;touch.y=dy;e.preventDefault();});
+  const up=()=>{touch.on=false;touch.x=touch.y=0;};
+  cv.addEventListener('pointerup',up);cv.addEventListener('pointercancel',up);
+  window.addEventListener('keydown',e=>{if(e.key.startsWith('Arrow')){keys[e.key]=true;e.preventDefault();}});
+  window.addEventListener('keyup',e=>{keys[e.key]=false;});
+  document.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
+
+  let listening=false;
+  async function begin(){
+    try{
+      if(window.DeviceOrientationEvent&&typeof DeviceOrientationEvent.requestPermission==='function'){
+        await DeviceOrientationEvent.requestPermission();
+      }
+    }catch(_){}
+    if(!listening){try{window.addEventListener('deviceorientation',onOrient);}catch(_){}listening=true;}
+    try{if(navigator.wakeLock)navigator.wakeLock.request('screen').catch(()=>{});}catch(_){}
+    reset(); $('startPanel').hidden=true; $('clearPanel').hidden=true; playing=true;
+  }
+  $('startBtn').addEventListener('click',begin);
+  $('retryBtn').addEventListener('click',begin);
+
+  reset(); fit();
+  window.addEventListener('resize',fit);
+  if(document.fonts&&document.fonts.ready)document.fonts.ready.then(fit);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
